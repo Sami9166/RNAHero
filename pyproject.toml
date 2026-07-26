@@ -1,0 +1,23 @@
+[project]
+name = "rnahero"
+version = "0.1.0"
+description = "GEO-to-edgeR candidate biomarker workflow"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+agent = ["google-adk>=1.0,<2.0"]
+
+[project.scripts]
+rnahero = "cli:main"
+rnahero-ncbi-mcp = "ncbi_mcp:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["agent", "cli", "ncbi_mcp", "run", "summarizer", "web", "workflow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

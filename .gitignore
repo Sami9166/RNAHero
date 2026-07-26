@@ -1,0 +1,6 @@
+/output
+.env
+.rnahero
+.venv
+rnahero.egg-info
+__pycache__
