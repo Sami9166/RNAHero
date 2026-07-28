@@ -100,7 +100,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _analysis_artifact(output_dir: Path, filename: str) -> Path:
-    current = output_dir / "analysis" / filename
+    current = output_dir / "analysis" / "validation" / filename
+    legacy = output_dir / "analysis" / filename
+    return current if current.is_file() else legacy if legacy.is_file() else output_dir / filename
+
+
+def _provenance_artifact(output_dir: Path, filename: str) -> Path:
+    current = output_dir / "provenance" / filename
     return current if current.is_file() else output_dir / filename
 
 
@@ -109,11 +115,11 @@ def _critic_packet(output_dir: Path) -> dict[str, Any]:
     report = _read_json(_analysis_artifact(output_dir, "validation_report.json"))
     ranking = report.get("candidate_ranking", [])
     locked = [row for row in ranking if row.get("passed")] or report.get("locked_candidates", [])
-    cohorts_path = output_dir / "cohorts.json"
-    cohorts = _read_json(cohorts_path) if cohorts_path.is_file() else _read_json(output_dir / "run_manifest.json").get("cohorts", [])
+    cohorts_path = _provenance_artifact(output_dir, "cohorts.json")
+    cohorts = _read_json(cohorts_path) if cohorts_path.is_file() else _read_json(_provenance_artifact(output_dir, "run_manifest.json")).get("cohorts", [])
     return {
         "cohorts": cohorts,
-        "analysis_config": _read_json(_analysis_artifact(output_dir, "analysis_config.json")),
+        "analysis_config": _read_json(_provenance_artifact(output_dir, "analysis_config.json")),
         "validation": {
             "thresholds": {key: report.get(key) for key in (
                 "fdr", "min_validation_auc", "min_validation_sensitivity", "min_validation_specificity"

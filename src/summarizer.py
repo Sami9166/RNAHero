@@ -55,9 +55,9 @@ def _gost(genes: list[str]) -> list[dict[str, Any]]:
 def create_go_enrichment(output_dir: Path, cohort_id: str, fdr: float) -> dict[str, Any]:
     """Write GO enrichment table and dot plot for one development cohort's DEGs."""
     analysis_dir = output_dir / "analysis"
-    rows = _rows(analysis_dir / cohort_id / "edger_results.csv")
+    rows = _rows(analysis_dir / "cohorts" / cohort_id / "edgeR" / "edger_results.csv")
     gene_sets = _go_gene_sets(rows, fdr)
-    output = analysis_dir / "summary" / "go" / cohort_id
+    output = analysis_dir / "go" / cohort_id
     result_csv = output / "go_enrichment.csv"
     go_rows: list[dict[str, Any]] = []
     error = ""
@@ -104,14 +104,14 @@ def create_go_enrichment(output_dir: Path, cohort_id: str, fdr: float) -> dict[s
 
 def _top_five(output_dir: Path) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     analysis_dir = output_dir / "analysis"
-    report = json.loads((analysis_dir / "validation_report.json").read_text(encoding="utf-8"))
+    report = json.loads((analysis_dir / "validation" / "validation_report.json").read_text(encoding="utf-8"))
     fdr = float(report["fdr"])
     candidates: list[dict[str, Any]] = []
     for candidate in report.get("candidate_ranking", []):
         if not candidate.get("passed"):
             continue
         result = next(
-            (row for row in _rows(analysis_dir / str(candidate["discovery"]) / "edger_results.csv")
+            (row for row in _rows(analysis_dir / "cohorts" / str(candidate["discovery"]) / "edgeR" / "edger_results.csv")
              if row["gene_id"] == candidate["gene_id"] and float(row["FDR"]) <= fdr),
             None,
         )
@@ -130,18 +130,18 @@ def create_pca_heatmap(output_dir: Path, cohort_id: str, gene_ids: list[str]) ->
     if root not in output_dir.parents:
         raise ValueError("output_dir must be inside the RNAHero project")
     analysis_dir = output_dir / "analysis"
-    available = {row["gene_id"] for row in _rows(analysis_dir / cohort_id / "logcpm.csv")}
+    available = {row["gene_id"] for row in _rows(analysis_dir / "cohorts" / cohort_id / "edgeR" / "logcpm.csv")}
     genes = [gene for gene in dict.fromkeys(gene_ids) if gene in available]
     if len(genes) < 2:
         return {"cohort": cohort_id, "status": "skipped", "reason": "at least two selected genes are required"}
-    figures = analysis_dir / "summary" / "figures" / cohort_id
+    figures = output_dir / "report" / "figures" / cohort_id
     gene_file = figures / "selected_genes.txt"
     figures.mkdir(parents=True, exist_ok=True)
     gene_file.write_text("\n".join(genes) + "\n", encoding="utf-8")
     result = subprocess.run(
         [
             _rscript(), str(Path(__file__).with_name("visualize.R")),
-            str(analysis_dir / cohort_id / "logcpm.csv"), str(output_dir / "samples" / f"{cohort_id}.csv"),
+            str(analysis_dir / "cohorts" / cohort_id / "edgeR" / "logcpm.csv"), str(output_dir / "cohorts" / cohort_id / "input" / "samples.csv"),
             str(gene_file), str(figures),
         ],
         capture_output=True,
@@ -162,7 +162,7 @@ def run_summarizer(output_dir: Path) -> dict[str, Any]:
     """Prepare locked evidence and visual artifacts for the ADK Markdown writer."""
     output_dir = output_dir.resolve()
     primary, top_five, report = _top_five(output_dir)
-    external = json.loads((output_dir / "analysis" / "analysis_config.json").read_text(encoding="utf-8"))["external"]["name"]
+    external = json.loads((output_dir / "provenance" / "analysis_config.json").read_text(encoding="utf-8"))["external"]["name"]
     external_scores = {
         (str(row["gene_id"]), str(row["discovery"])): row
         for row in report.get("external_validation", [])
@@ -176,7 +176,7 @@ def run_summarizer(output_dir: Path) -> dict[str, Any]:
         [str(row["external"]["validation_gene_id"]) for row in top_five if row.get("external")],
     )
     go_enrichment = create_go_enrichment(output_dir, primary, float(report["fdr"]))
-    critic_path = output_dir / "analysis" / "critic_report.json"
+    critic_path = output_dir / "analysis" / "validation" / "critic_report.json"
     critic = json.loads(critic_path.read_text(encoding="utf-8")) if critic_path.is_file() else {}
     return {
         "selection_basis": "Internally locked, FDR-significant candidates ranked by absolute logFC across development-cohort discoveries; external data are not used for ranking.",

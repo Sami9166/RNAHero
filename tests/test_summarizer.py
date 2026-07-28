@@ -24,7 +24,7 @@ class SummarizerTests(unittest.TestCase):
                 "dev1": [["A", "2.0", "0.01"], ["B", "-4.0", "0.01"]],
                 "dev2": [["C", "10.0", "0.2"]],
             }.items():
-                path = analysis / cohort
+                path = analysis / "cohorts" / cohort / "edgeR"
                 path.mkdir(parents=True)
                 with (path / "edger_results.csv").open("w", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle)
@@ -35,7 +35,8 @@ class SummarizerTests(unittest.TestCase):
                 {"gene_id": "B", "discovery": "dev1", "passed": True},
                 {"gene_id": "C", "discovery": "dev2", "passed": True},
             ]}
-            (analysis / "validation_report.json").write_text(json.dumps(report), encoding="utf-8")
+            (analysis / "validation").mkdir(parents=True)
+            (analysis / "validation" / "validation_report.json").write_text(json.dumps(report), encoding="utf-8")
             cohort, genes, _ = _top_five(root)
             self.assertEqual(cohort, "dev1")
             self.assertEqual([gene["gene_id"] for gene in genes], ["B", "A"])

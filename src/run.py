@@ -412,28 +412,31 @@ def _clinical_candidates(disease: str, organism: str, limit: int) -> tuple[list[
 
 def _record_analysis(output_dir: Path, manifest: dict[str, Any], analysis: dict[str, Any]) -> None:
     analysis_dir = output_dir / "analysis"
+    validation_dir = analysis_dir / "validation"
     ranking = analysis["candidate_ranking"]
     biomarkers = [row for row in ranking if row["passed"]]
     _write_json(analysis_dir / "biomarkers.json", biomarkers)
     _write_csv(analysis_dir / "biomarkers.csv", biomarkers)
     _write_csv(analysis_dir / "candidate_scores.csv", ranking)
     internal_validation = analysis.get("development_validation", [])
-    _write_json(analysis_dir / "internal_validation.json", internal_validation)
-    _write_validation_csv(analysis_dir / "internal_validation.csv", internal_validation)
+    _write_json(validation_dir / "internal_validation.json", internal_validation)
+    _write_validation_csv(validation_dir / "internal_validation.csv", internal_validation)
     external_validation = analysis.get("external_validation", [])
-    _write_json(analysis_dir / "external_validation.json", external_validation)
-    _write_validation_csv(analysis_dir / "external_validation.csv", external_validation)
+    _write_json(validation_dir / "external_validation.json", external_validation)
+    _write_validation_csv(validation_dir / "external_validation.csv", external_validation)
     manifest["analysis"] = {"candidate_score_count": len(ranking), "biomarker_count": len(biomarkers), "external_validation_count": len(external_validation), "top_biomarkers": biomarkers[:5], "fdr": analysis["fdr"], "min_validation_auc": analysis["min_validation_auc"], "min_validation_sensitivity": analysis["min_validation_sensitivity"], "min_validation_specificity": analysis["min_validation_specificity"]}
     try:
         critic = run_critic(output_dir)
-        _write_json(analysis_dir / "critic_report.json", critic)
+        _write_json(validation_dir / "critic_report.json", critic)
         manifest["critic"] = {key: critic.get(key) for key in ("engine", "verdict", "summary")}
     except Exception as error:
         manifest["critic"] = {"status": "unavailable", "reason": str(error)}
     try:
         summary = run_summarizer(output_dir)
         report = run_summarizer_agent(summary)
-        (analysis_dir / "summary_report.md").write_text(report, encoding="utf-8")
+        report_dir = output_dir / "report"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "summary_report.md").write_text(report, encoding="utf-8")
         manifest["summarizer"] = {"engine": "google-adk", "primary_development_cohort": summary["primary_development_cohort"], "top_gene_count": len(summary["top_five"])}
     except Exception as error:
         manifest["summarizer"] = {"status": "unavailable", "reason": str(error)}
@@ -442,14 +445,15 @@ def _record_analysis(output_dir: Path, manifest: dict[str, Any], analysis: dict[
 def resume_analysis(output_dir: Path = Path("output")) -> dict[str, Any]:
     """Finish a run from retained edgeR artifacts without repeating GEO collection."""
     output_dir = output_dir.resolve()
-    manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    provenance = output_dir / "provenance"
+    manifest = json.loads((provenance / "run_manifest.json").read_text(encoding="utf-8"))
     try:
-        _record_analysis(output_dir, manifest, run_pipeline(output_dir / "analysis" / "analysis_config.json"))
+        _record_analysis(output_dir, manifest, run_pipeline(provenance / "analysis_config.json"))
         manifest["stage"] = "complete"
         manifest.pop("reason", None)
     except Exception as error:
         manifest.update({"stage": "analysis_failed", "reason": str(error)})
-    _write_json(output_dir / "run_manifest.json", manifest)
+    _write_json(provenance / "run_manifest.json", manifest)
     return manifest
 
 
@@ -457,44 +461,45 @@ def run_disease(disease: str, output_dir: Path = Path("output"), organism: str =
     """Collect, preserve, select, and analyse a disease in one command when evidence permits."""
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    provenance = output_dir / "provenance"
     manifest: dict[str, Any] = {
         "disease": disease,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "stage": "searching",
         "studies": [],
     }
-    _write_json(output_dir / "run_manifest.json", manifest)
+    _write_json(provenance / "run_manifest.json", manifest)
     candidate_limit = min(25, max(20, limit))
     try:
         clinical_queries, studies = _clinical_candidates(disease, organism, candidate_limit)
     except Exception as error:
         manifest.update({"stage": "search_failed", "reason": str(error), "candidate_limit": candidate_limit})
-        _write_json(output_dir / "run_manifest.json", manifest)
+        _write_json(provenance / "run_manifest.json", manifest)
         return manifest
     manifest["clinical_queries"] = clinical_queries
     manifest["candidate_limit"] = candidate_limit
     manifest["studies"] = [_candidate_preview(study) for study in studies]
-    _write_json(output_dir / "search_results.json", manifest["studies"])
+    _write_json(provenance / "search_results.json", manifest["studies"])
     studies_with_metadata = [{**study, **fetch_geo_sample_metadata(study["gse_id"])} for study in studies]
     assessments = _assess_cohorts(disease, studies_with_metadata)
     assessed_studies = [{**study, "cohort_assessment": assessments[study["gse_id"]]} for study in studies_with_metadata]
     manifest["stage"] = "selecting_cohorts"
-    _write_json(output_dir / "run_manifest.json", manifest)
+    _write_json(provenance / "run_manifest.json", manifest)
 
     eligible = [study for study in assessed_studies if study["cohort_assessment"]["status"] == "eligible"]
     if len(eligible) < 4:
         failed = [study for study in assessed_studies if study["cohort_assessment"]["status"] == "assessment_failed"]
         if len(failed) == len(assessed_studies):
             manifest.update({"stage": "cohort_assessment_failed", "reason": failed[0]["cohort_assessment"]["reason"]})
-            _write_json(output_dir / "run_manifest.json", manifest)
+            _write_json(provenance / "run_manifest.json", manifest)
             return manifest
         manifest.update({"stage": "needs_cohort_review", "reason": f"only {len(eligible)} studies have at least two usable case and control samples after AI metadata exclusions"})
-        _write_json(output_dir / "run_manifest.json", manifest)
+        _write_json(provenance / "run_manifest.json", manifest)
         return manifest
     selected, error = _select_cohorts(disease, eligible)
     if not selected:
         manifest.update({"stage": "needs_cohort_review", "reason": error})
-        _write_json(output_dir / "run_manifest.json", manifest)
+        _write_json(provenance / "run_manifest.json", manifest)
         return manifest
 
     by_id = {study["gse_id"]: study for study in assessed_studies}
@@ -506,7 +511,8 @@ def run_disease(disease: str, output_dir: Path = Path("output"), organism: str =
     while pending:
         choice = pending.pop(0)
         study = by_id[choice["gse_id"]]
-        raw_dir = output_dir / "raw" / study["gse_id"]
+        cohort_dir = output_dir / "cohorts" / study["gse_id"]
+        raw_dir = cohort_dir / "raw"
         try:
             filename = study["raw_count_files"][0]["filename"]
             download = fetch_raw_count_matrix(study["gse_id"], filename, raw_dir)
@@ -514,23 +520,23 @@ def run_disease(disease: str, output_dir: Path = Path("output"), organism: str =
             columns = _columns(raw_path)
             _require_integer_counts(raw_path)
             crosswalk = match_count_columns_to_samples(columns, study["sample_metadata"])
-            _write_json(analysis_dir / study["gse_id"] / "crosswalk.json", crosswalk)
+            _write_json(cohort_dir / "input" / "crosswalk.json", crosswalk)
             groups, group_error = _groups_from_assessment(study["cohort_assessment"], columns, crosswalk)
             if not groups:
                 raise ValueError(group_error)
-            samples_path = output_dir / "samples" / f"{study['gse_id']}.csv"
+            samples_path = cohort_dir / "input" / "samples.csv"
             samples_path.parent.mkdir(parents=True, exist_ok=True)
             with samples_path.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=["sample_id", "group"])
                 writer.writeheader()
                 writer.writerows({key: row[key] for key in ("sample_id", "group")} for row in groups)
-            counts_path = output_dir / "prepared" / f"{study['gse_id']}.csv"
+            counts_path = cohort_dir / "input" / "counts.csv"
             _prepare_matrix(raw_path, groups, counts_path)
             prepared.append({"name": study["gse_id"], "role": choice["role"], "counts": str(counts_path), "samples": str(samples_path), "selection_reason": choice.get("reason", "")})
         except Exception as error:
             rejected.append({"gse_id": study["gse_id"], "reason": str(error)})
-            if raw_dir.exists():
-                shutil.rmtree(raw_dir)
+            if cohort_dir.exists():
+                shutil.rmtree(cohort_dir)
             backup = next((item for item in eligible if item["gse_id"] not in reserved), None)
             if backup:
                 reserved.add(backup["gse_id"])
@@ -539,31 +545,32 @@ def run_disease(disease: str, output_dir: Path = Path("output"), organism: str =
 
     if len(prepared) != 4:
         manifest.update({"stage": "needs_sample_review", "reason": "fewer than four cohorts could be prepared", "rejected": rejected, "prepared": prepared})
-        _write_json(output_dir / "run_manifest.json", manifest)
+        _write_json(provenance / "run_manifest.json", manifest)
         return manifest
 
     cohorts = [_cohort_summary(by_id[item["name"]], item) for item in prepared]
     for item in prepared:
-        _write_json(output_dir / "metadata" / f"{item['name']}.json", by_id[item["name"]])
-    _write_json(output_dir / "cohorts.json", cohorts)
+        _write_json(output_dir / "cohorts" / item["name"] / "metadata.json", by_id[item["name"]])
+    _write_json(provenance / "cohorts.json", cohorts)
     external = next(item for item in prepared if item["role"] == "external")
     config = {
         "fdr": 0.05,
         "min_validation_auc": 0.8,
         "min_validation_sensitivity": 0.7,
         "min_validation_specificity": 0.7,
-        "output_dir": str(analysis_dir),
+        "output_dir": str(analysis_dir / "cohorts"),
+        "validation_output_dir": str(analysis_dir / "validation"),
         "development": [{key: item[key] for key in ("name", "counts", "samples")} for item in prepared if item["role"] == "development"],
         "external": {key: external[key] for key in ("name", "counts", "samples")},
     }
-    _write_json(analysis_dir / "analysis_config.json", config)
+    _write_json(provenance / "analysis_config.json", config)
     manifest.update({"stage": "analysing", "cohorts": cohorts, "rejected_count": len(rejected)})
-    _write_json(output_dir / "run_manifest.json", manifest)
+    _write_json(provenance / "run_manifest.json", manifest)
     try:
-        analysis = run_pipeline(analysis_dir / "analysis_config.json")
+        analysis = run_pipeline(provenance / "analysis_config.json")
         _record_analysis(output_dir, manifest, analysis)
         manifest["stage"] = "complete"
     except Exception as error:
         manifest.update({"stage": "analysis_failed", "reason": str(error)})
-    _write_json(output_dir / "run_manifest.json", manifest)
+    _write_json(provenance / "run_manifest.json", manifest)
     return manifest

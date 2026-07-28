@@ -46,6 +46,10 @@ def _edger_complete(output_dir: Path) -> bool:
     return (output_dir / "edger_results.csv").is_file() and (output_dir / "logcpm.csv").is_file()
 
 
+def _cohort_output(output_dir: Path, name: str) -> Path:
+    return output_dir / name / "edgeR"
+
+
 @lru_cache(maxsize=16)
 def _logcpm(path: Path) -> dict[str, dict[str, float]]:
     rows = _rows(path)
@@ -170,9 +174,9 @@ def _validation_gene(gene: str, values: dict[str, dict[str, float]], symbol_to_e
 
 
 def score_gene(gene: str, direction: float, discovery: Cohort, validation: Cohort, outputs: Path, validation_gene: str | None = None, discovery_matrix: dict[str, dict[str, float]] | None = None, validation_matrix: dict[str, dict[str, float]] | None = None, discovery_groups: dict[str, str] | None = None, validation_groups: dict[str, str] | None = None) -> dict[str, float | str]:
-    discovery_values = (discovery_matrix or _logcpm(outputs / discovery.name / "logcpm.csv"))[gene]
+    discovery_values = (discovery_matrix or _logcpm(_cohort_output(outputs, discovery.name) / "logcpm.csv"))[gene]
     validation_gene = validation_gene or gene
-    validation_values = (validation_matrix or _logcpm(outputs / validation.name / "logcpm.csv")).get(validation_gene)
+    validation_values = (validation_matrix or _logcpm(_cohort_output(outputs, validation.name) / "logcpm.csv")).get(validation_gene)
     if validation_values is None:
         raise ValueError(f"{validation_gene} is missing from {validation.name}")
     discovery_groups = discovery_groups or _groups(discovery.samples)
@@ -229,16 +233,17 @@ def run_pipeline(config_path: Path) -> dict[str, Any]:
         raise ValueError("config requires exactly three development cohorts")
     external = Cohort(**{key: Path(value) if key in {"counts", "samples"} else value for key, value in config["external"].items()})
     output_dir = Path(config.get("output_dir", "outputs"))
+    validation_output_dir = Path(config.get("validation_output_dir", output_dir))
     fdr = float(config.get("fdr", 0.05))
     with ThreadPoolExecutor(max_workers=3) as executor:
         list(executor.map(
-            lambda cohort: output_dir / cohort.name if _edger_complete(output_dir / cohort.name) else run_edger(cohort, output_dir / cohort.name),
+            lambda cohort: _cohort_output(output_dir, cohort.name) if _edger_complete(_cohort_output(output_dir, cohort.name)) else run_edger(cohort, _cohort_output(output_dir, cohort.name)),
             development,
         ))
     reports: list[dict[str, Any]] = []
     skipped_candidates: list[dict[str, str]] = []
-    candidates_by_discovery = {cohort.name: _candidates(output_dir / cohort.name / "edger_results.csv", fdr) for cohort in development}
-    development_values = {cohort.name: _logcpm(output_dir / cohort.name / "logcpm.csv") for cohort in development}
+    candidates_by_discovery = {cohort.name: _candidates(_cohort_output(output_dir, cohort.name) / "edger_results.csv", fdr) for cohort in development}
+    development_values = {cohort.name: _logcpm(_cohort_output(output_dir, cohort.name) / "logcpm.csv") for cohort in development}
     development_groups = {cohort.name: _groups(cohort.samples) for cohort in development}
     development_ensembl = {name: {identifier.split(".", 1)[0]: identifier for identifier in values} for name, values in development_values.items()}
     candidate_symbols = sorted({gene for candidates in candidates_by_discovery.values() for gene, _ in candidates if not gene.startswith("ENSG")})
@@ -274,10 +279,10 @@ def run_pipeline(config_path: Path) -> dict[str, Any]:
             for score in scores
         )
     ]
-    if not _edger_complete(output_dir / external.name):
-        run_edger(external, output_dir / external.name)
+    if not _edger_complete(_cohort_output(output_dir, external.name)):
+        run_edger(external, _cohort_output(output_dir, external.name))
     external_reports = []
-    external_values = _logcpm(output_dir / external.name / "logcpm.csv")
+    external_values = _logcpm(_cohort_output(output_dir, external.name) / "logcpm.csv")
     external_groups = _groups(external.samples)
     missing_symbols = [str(row["gene_id"]) for row in locked_candidates if row["gene_id"] not in external_values]
     external_symbol_to_ensembl = _ensembl_for_symbols(missing_symbols)
@@ -292,5 +297,6 @@ def run_pipeline(config_path: Path) -> dict[str, Any]:
         discovery = next(cohort for cohort in development if cohort.name == row["discovery"])
         external_reports.append(score_gene(row["gene_id"], float(row["direction"]), discovery, external, output_dir, validation_gene, development_values[discovery.name], external_values, development_groups[discovery.name], external_groups))
     report = {"development_validation": reports, "candidate_ranking": candidate_ranking, "locked_candidates": locked_candidates, "external_validation": external_reports, "skipped_candidates": skipped_candidates, "gene_id_standardization": {"source": "Ensembl REST lookup/symbol and lookup/id", "internal_symbol_mappings": len(symbol_to_ensembl), "internal_id_mappings": len(ensembl_to_symbol), "external_symbol_mappings": len(external_symbol_to_ensembl)}, "fdr": fdr, "min_validation_auc": min_auc, "min_validation_sensitivity": min_sensitivity, "min_validation_specificity": min_specificity}
-    (output_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    validation_output_dir.mkdir(parents=True, exist_ok=True)
+    (validation_output_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report

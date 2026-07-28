@@ -89,29 +89,41 @@ external cohort는 후보를 고르거나 기준을 바꾸는 데 사용하지 �
 
 ```text
 output/
-  search_results.json                 # GEO 후보 목록
-  cohorts.json                        # 실제 분석에 채택된 4개 cohort
-  metadata/GSE....json                # 채택 cohort의 GEO metadata
-  raw/GSE.../                         # 내려받은 원본 raw count
-  prepared/GSE....csv                 # edgeR 입력 행렬
-  samples/GSE....csv                  # case/control sample sheet
-  analysis/
-    analysis_config.json
-    GSE.../crosswalk.json             # count 열 ↔ GSM ↔ group
-    GSE.../edger_results.csv
-    GSE.../logcpm.csv
-    biomarkers.json / biomarkers.csv
-    internal_validation.json / .csv
-    external_validation.json / .csv
-    validation_report.json
-    critic_report.json
-    summary_report.md                 # ADK summarizer의 최종 보고서
-    summary/figures/GSE.../
+  report/                             # 사용자가 먼저 보는 최종 결과
+    summary_report.md
+    figures/GSE.../
       top5_pca.png
       top5_heatmap.png
-    summary/go/GSE.../
-      go_enrichment.csv                # FDR 통과 DEG의 GO enrichment 결과
+
+  cohorts/                            # GSE별 원본·입력 근거
+    GSE.../
+      metadata.json
+      raw/                             # 내려받은 원본 raw count
+      input/
+        counts.csv                     # edgeR 입력 행렬
+        samples.csv                    # case/control sample sheet
+        crosswalk.json                 # count 열 ↔ GSM ↔ group
+
+  analysis/                            # 재현 가능한 분석 산출물
+    biomarkers.json / biomarkers.csv
+    candidate_scores.csv
+    cohorts/GSE.../edgeR/
+      edger_results.csv
+      logcpm.csv
+    validation/
+      internal_validation.json / .csv
+      external_validation.json / .csv
+      validation_report.json
+      critic_report.json
+    go/GSE.../
+      go_enrichment.csv
       go_dotplot.png
+
+  provenance/                          # 검색·선정·재개 근거
+    search_results.json
+    cohorts.json
+    analysis_config.json
+    run_manifest.json
 ```
 
 PCA와 heatmap은 각각 development cohort와 external cohort에 생성됩니다. PCA는 샘플 수준의 군 분리를, heatmap은 상위 5개 유전자의 발현 패턴을 보여 줍니다.

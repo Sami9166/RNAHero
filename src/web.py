@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         elif parsed.path == "/api/latest":
             output = parse_qs(parsed.query).get("output", ["output"])[0]
-            path = Path(output) / "run_manifest.json"
+            path = Path(output) / "provenance" / "run_manifest.json"
             if path.is_file():
                 self._json(json.loads(path.read_text(encoding="utf-8")))
             else:

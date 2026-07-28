@@ -27,11 +27,11 @@ class WorkflowTests(unittest.TestCase):
 
             outputs = root / "outputs"
             for cohort in cohorts:
-                run_edger(cohort, outputs / cohort.name)
+                run_edger(cohort, outputs / cohort.name / "edgeR")
             score = score_gene("GENE1", 1.0, cohorts[0], cohorts[1], outputs)
             self.assertEqual(score["cohort"], "dev2")
             self.assertGreaterEqual(float(score["auc"]), 0.5)
-            self.assertTrue((outputs / "dev1" / "edger_results.csv").is_file())
+            self.assertTrue((outputs / "dev1" / "edgeR" / "edger_results.csv").is_file())
 
     def test_validation_gene_maps_symbols_and_ensembl_ids(self) -> None:
         self.assertEqual(_validation_gene("A1BG", {"ENSG00000121410": {}}, {"A1BG": "ENSG00000121410"}, {}), "ENSG00000121410")

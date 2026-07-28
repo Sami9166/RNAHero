@@ -59,7 +59,7 @@ def main() -> None:
         result = resume_analysis(args.output)
     elif args.command == "summarize":
         summary = run_summarizer(args.output)
-        report_path = args.output / "analysis" / "summary_report.md"
+        report_path = args.output / "report" / "summary_report.md"
         report_path.write_text(run_summarizer_agent(summary), encoding="utf-8")
         result = {"report": str(report_path), "figures": summary["visualizations"]}
     else:
