@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import csv
 import json
+import ssl
 import subprocess
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Any
+
+import certifi
 
 from workflow import _rscript
 
@@ -14,6 +19,87 @@ from workflow import _rscript
 def _rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
+
+
+def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = ["direction", "source", "term_id", "term_name", "p_value", "term_size", "query_size", "intersection_size"]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _go_gene_sets(rows: list[dict[str, str]], fdr: float) -> dict[str, list[str]]:
+    """Split FDR-significant differential genes by direction for GO enrichment."""
+    return {
+        "up": [row["gene_id"] for row in rows if float(row["FDR"]) <= fdr and float(row["logFC"]) > 0],
+        "down": [row["gene_id"] for row in rows if float(row["FDR"]) <= fdr and float(row["logFC"]) < 0],
+    }
+
+
+def _gost(genes: list[str]) -> list[dict[str, Any]]:
+    payload = json.dumps({
+        "organism": "hsapiens",
+        "query": genes,
+        "sources": ["GO:BP", "GO:MF", "GO:CC"],
+        "user_threshold": 0.05,
+        "significance_threshold_method": "g_SCS",
+        "no_evidences": True,
+    }).encode()
+    request = Request("https://biit.cs.ut.ee/gprofiler/api/gost/profile/", data=payload, headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=30, context=ssl.create_default_context(cafile=certifi.where())) as response:
+        return json.loads(response.read().decode("utf-8")).get("result", [])
+
+
+def create_go_enrichment(output_dir: Path, cohort_id: str, fdr: float) -> dict[str, Any]:
+    """Write GO enrichment table and dot plot for one development cohort's DEGs."""
+    analysis_dir = output_dir / "analysis"
+    rows = _rows(analysis_dir / cohort_id / "edger_results.csv")
+    gene_sets = _go_gene_sets(rows, fdr)
+    output = analysis_dir / "summary" / "go" / cohort_id
+    result_csv = output / "go_enrichment.csv"
+    go_rows: list[dict[str, Any]] = []
+    error = ""
+    try:
+        for direction, genes in gene_sets.items():
+            if len(genes) < 5:
+                continue
+            for term in _gost(genes):
+                if term.get("significant"):
+                    go_rows.append({
+                        "direction": direction,
+                        "source": term.get("source", ""),
+                        "term_id": term.get("native", ""),
+                        "term_name": term.get("name", ""),
+                        "p_value": term.get("p_value", ""),
+                        "term_size": term.get("term_size", ""),
+                        "query_size": term.get("query_size", ""),
+                        "intersection_size": term.get("intersection_size", ""),
+                    })
+    except (URLError, TimeoutError, ValueError) as exc:
+        error = str(exc)
+    go_rows.sort(key=lambda row: float(row["p_value"]))
+    _write_rows(result_csv, go_rows)
+    output.mkdir(parents=True, exist_ok=True)
+    figure = output / "go_dotplot.png"
+    result = subprocess.run(
+        [_rscript(), str(Path(__file__).with_name("go_visualize.R")), str(result_csv), str(figure), cohort_id],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "GO visualization failed")
+    return {
+        "cohort": cohort_id,
+        "status": "complete" if not error else "unavailable",
+        "fdr": fdr,
+        "input_gene_counts": {key: len(value) for key, value in gene_sets.items()},
+        "term_count": len(go_rows),
+        "results": str(result_csv),
+        "dotplot": str(figure),
+        "reason": error or None,
+    }
 
 
 def _top_five(output_dir: Path) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
@@ -89,6 +175,7 @@ def run_summarizer(output_dir: Path) -> dict[str, Any]:
         external,
         [str(row["external"]["validation_gene_id"]) for row in top_five if row.get("external")],
     )
+    go_enrichment = create_go_enrichment(output_dir, primary, float(report["fdr"]))
     critic_path = output_dir / "analysis" / "critic_report.json"
     critic = json.loads(critic_path.read_text(encoding="utf-8")) if critic_path.is_file() else {}
     return {
@@ -96,5 +183,6 @@ def run_summarizer(output_dir: Path) -> dict[str, Any]:
         "primary_development_cohort": primary,
         "top_five": top_five,
         "visualizations": {"development": development_visual, "external": external_visual},
+        "go_enrichment": go_enrichment,
         "critic": critic,
     }

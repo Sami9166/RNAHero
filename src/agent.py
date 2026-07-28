@@ -41,7 +41,7 @@ SUMMARIZER_INSTRUCTION = """You are RNAHero's final research summarizer.
 You receive a completed deterministic biomarker summary: the internally selected top-five genes, internal and external validation metrics, PCA/heatmap artifact paths, and the critic report.
 Do not re-rank genes, relax thresholds, or use external data to select a candidate. Treat every gene as a research candidate, never a clinical diagnostic.
 The PCA and heatmap files have already been created. Do not call a tool during this task.
-Return Korean Markdown only, beginning with "# RNAHero 요약 보고서". Include a concise conclusion, a table for the supplied five genes and their metrics, a visualization section citing the supplied PNG paths, the critic's concerns under "## 비판점", and a next step. Do not wrap the Markdown in a code fence."""
+Return Korean Markdown only, beginning with "# RNAHero 요약 보고서". Include a concise conclusion, a table for the supplied five genes and their metrics, a visualization section citing the supplied PCA/heatmap PNG paths, a GO enrichment section when supplied (with its cohort-specific limitation and dot-plot path), the critic's concerns under "## 비판점", and a next step. Do not wrap the Markdown in a code fence."""
 
 
 def _local_mcp_tools():

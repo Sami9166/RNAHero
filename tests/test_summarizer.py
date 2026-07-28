@@ -4,10 +4,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from summarizer import _top_five
+from summarizer import _go_gene_sets, _top_five
 
 
 class SummarizerTests(unittest.TestCase):
+    def test_go_gene_sets_use_fdr_and_direction(self) -> None:
+        rows = [
+            {"gene_id": "UP", "logFC": "1.2", "FDR": "0.01"},
+            {"gene_id": "DOWN", "logFC": "-1.2", "FDR": "0.01"},
+            {"gene_id": "NOT_FDR", "logFC": "2", "FDR": "0.2"},
+        ]
+        self.assertEqual(_go_gene_sets(rows, 0.05), {"up": ["UP"], "down": ["DOWN"]})
+
     def test_top_five_uses_internal_fdr_significant_logfc_from_one_cohort(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

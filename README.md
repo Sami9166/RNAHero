@@ -68,7 +68,9 @@ lock된 후보만 external cohort에서 평가
   ↓
 ADK critic: cohort 근거·내부/외부 검증·재현성 한계 비판적 점검
   ↓
-ADK summarizer: 상위 5개 logFC 후보, critic 비판점, PCA·heatmap 경로를 Markdown 보고서로 작성
+GO enrichment: primary development cohort의 FDR 통과 DEG 기능 분석과 dot plot 생성
+  ↓
+ADK summarizer: 상위 5개 logFC 후보, GO 결과, critic 비판점, PCA·heatmap 경로를 Markdown 보고서로 작성
 ```
 
 external cohort는 후보를 고르거나 기준을 바꾸는 데 사용하지 않습니다. 후보 순위는 development cohort에서 내부 검증을 통과하고 FDR 기준을 만족한 유전자들의 절대 logFC를 기준으로 정합니다.
@@ -107,9 +109,13 @@ output/
     summary/figures/GSE.../
       top5_pca.png
       top5_heatmap.png
+    summary/go/GSE.../
+      go_enrichment.csv                # FDR 통과 DEG의 GO enrichment 결과
+      go_dotplot.png
 ```
 
 PCA와 heatmap은 각각 development cohort와 external cohort에 생성됩니다. PCA는 샘플 수준의 군 분리를, heatmap은 상위 5개 유전자의 발현 패턴을 보여 줍니다.
+GO enrichment은 primary development cohort의 FDR 통과 DEG를 up/down으로 나누고 g:Profiler의 인간 유전체 기본 배경으로 수행합니다. 따라서 기능 해석은 cohort-specific이며, 외부 cohort로 후보를 선택하지 않습니다.
 
 ## 수동 edgeR 실행
 
