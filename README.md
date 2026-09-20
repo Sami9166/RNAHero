@@ -3,6 +3,7 @@
 RNAHero는 질환명 입력으로 GEO 기반 bulk RNA-seq 연구를 탐색, 선별하고 edgeR과 scikit-learn을 활용해 바이오마커 후보를 발굴·검증하는 멀티 에이전트 시스템입니다.
 
 데이콘 제 4회 인공지능(AI) 신약개발 경진대회(4th JUMP AI, fourth.py) 출품작
+
 **47위 / 507팀**
 
 ## Introduction
