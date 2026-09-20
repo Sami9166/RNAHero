@@ -24,12 +24,15 @@ Do not run edgeR, change a candidate list, or tune a cutoff from held-out extern
 CRITIC_INSTRUCTION = """You are RNAHero's final read-only pipeline critic.
 You receive a compact evidence packet assembled from the completed GEO/edgeR run. Critically assess both internal validation (the two development cohorts used after each discovery cohort) and external validation (the held-out cohort).
 
+The packet includes a scope. When scope is "development", review only the named discovery cohort, ignore absent external validation, and use retry reason codes only for evidence that can be improved by replacing a development cohort. When scope is "final", assess the complete internal and held-out evidence.
+
 Do not change candidates, directions, FDR, cutoffs, cohort roles, or acceptance criteria. Do not invent missing evidence. Treat candidate biomarkers as research candidates only; never make clinical-use claims.
 
 Return JSON only with this exact shape:
 {
   "verdict": "interpretable|caution|not_interpretable",
   "summary": "short Korean summary",
+  "reason_codes": ["cohort_selection", "insufficient_internal_validation", "external_validation_gap", "reproducibility_gap", "no_locked_candidates", "id_mapping_gap"],
   "checks": [{"area":"cohort_selection|internal_validation|external_validation|reproducibility", "status":"pass|caution|fail", "evidence":"short Korean evidence"}],
   "strengths": ["..."],
   "concerns": ["..."],
@@ -129,10 +132,28 @@ def _critic_packet(output_dir: Path) -> dict[str, Any]:
             "locked_candidates": locked,
             "top_ranked_candidates": ranking[:20],
             "external_validation": report.get("external_validation", []),
+            "external_evaluated": report.get("external_evaluated", True),
             "skipped_candidate_count": len(report.get("skipped_candidates", [])),
             "gene_id_standardization": report.get("gene_id_standardization", {}),
         },
     }
+
+
+def _scoped_critic_packet(output_dir: Path, scope: str, cohort_id: str | None = None) -> dict[str, Any]:
+    """Limit development review to evidence from the named discovery cohort."""
+    packet = _critic_packet(output_dir)
+    packet["scope"] = scope
+    if cohort_id:
+        packet["cohort_id"] = cohort_id
+        for field in ("locked_candidates", "top_ranked_candidates"):
+            rows = packet["validation"].get(field, [])
+            packet["validation"][field] = [
+                row for row in rows if str(row.get("discovery")) == cohort_id
+            ]
+    if scope == "development":
+        packet["validation"]["external_validation"] = []
+        packet["validation"]["external_evaluated"] = False
+    return packet
 
 
 async def _run_agent_async(agent: Any, app_name: str, prompt: str) -> str:
@@ -157,9 +178,9 @@ async def _run_critic_async(prompt: str) -> str:
     return await _run_agent_async(build_critic(), "rnahero_critic", prompt)
 
 
-def run_critic(output_dir: Path) -> dict[str, Any]:
+def run_critic(output_dir: Path, *, scope: str = "final", cohort_id: str | None = None) -> dict[str, Any]:
     """Run one ADK critic turn against completed analysis artifacts."""
-    packet = _critic_packet(output_dir)
+    packet = _scoped_critic_packet(output_dir, scope, cohort_id)
     prompt = "Completed RNAHero run evidence packet:\n" + json.dumps(packet, ensure_ascii=False)
     text = asyncio.run(_run_critic_async(prompt)).strip()
     if text.startswith("```"):
@@ -167,8 +188,22 @@ def run_critic(output_dir: Path) -> dict[str, Any]:
     result = json.loads(text)
     if not isinstance(result, dict) or "verdict" not in result or "summary" not in result:
         raise RuntimeError("ADK critic did not return the required JSON report")
+    reason_codes = result.get("reason_codes", [])
+    if isinstance(reason_codes, str):
+        reason_codes = [code.strip() for code in reason_codes.split(",") if code.strip()]
+    elif not isinstance(reason_codes, list):
+        reason_codes = []
+    result["reason_codes"] = [str(code) for code in reason_codes]
+    result["scope"] = scope
+    if cohort_id:
+        result["cohort_id"] = cohort_id
     result["engine"] = "google-adk"
     return result
+
+
+def run_development_critic(output_dir: Path, cohort_id: str) -> dict[str, Any]:
+    """Critique one discovery cohort while keeping the held-out cohort read-only."""
+    return run_critic(output_dir, scope="development", cohort_id=cohort_id)
 
 
 def run_summarizer_agent(summary: dict[str, Any]) -> str:

@@ -4,10 +4,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from run import _ai_sample_metadata, _assess_cohort, _columns, _groups_from_assessment, _prepare_matrix, _retry_seconds, clear_output, run_disease
+from run import ApiCallLedger, _ai_sample_metadata, _assess_cohort, _columns, _groups_from_assessment, _prepare_matrix, _retry_seconds, clear_output, run_disease
 
 
 class RunTests(unittest.TestCase):
+    def test_api_budget_matches_proposal_formula(self) -> None:
+        ledger = ApiCallLedger(20, 2)
+        self.assertEqual(ledger.snapshot()["budget"], 11)
+        ledger.open_loop(4)
+        self.assertEqual(ledger.snapshot()["budget"], 16)
+        ledger.open_loop(4)
+        self.assertEqual(ledger.snapshot()["budget"], 21)
+        self.assertEqual(ledger.snapshot()["formula"], "ceil(N/4) + 6 + sum(K_l + 4)")
+
     def test_clear_output_only_removes_a_project_subfolder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -184,6 +193,64 @@ class RunTests(unittest.TestCase):
             self.assertEqual(pipeline.call_count, 1)
             self.assertEqual(pipeline.call_args.args[0], root / "provenance" / "analysis_config.json")
             self.assertEqual(critic.call_count, 1)
+
+    @patch("run.run_development_critic", return_value={"scope": "development", "reason_codes": ["no_locked_candidates"], "verdict": "caution"})
+    @patch("run.run_critic", return_value={"engine": "google-adk", "verdict": "caution", "summary": "reviewed", "reason_codes": []})
+    @patch("run.run_pipeline")
+    @patch("run._select_cohorts")
+    @patch("run._assess_cohorts")
+    @patch("run.match_count_columns_to_samples")
+    @patch("run.fetch_raw_count_matrix")
+    @patch("run.fetch_geo_sample_metadata")
+    @patch("run.find_bulk_rnaseq")
+    def test_bounded_retry_reselects_unused_cohort(self, search, metadata, download, crosswalk, assessment, selection, pipeline, critic, development_critic) -> None:
+        studies = [{"gse_id": f"GSE{i}", "title": f"study {i}", "sample_count": 4, "raw_count_files": [{"filename": "matrix.csv"}]} for i in range(1, 6)]
+        search.return_value = studies
+        metadata.side_effect = lambda gse: {"gse_id": gse, "sample_metadata": []}
+        assessment.side_effect = lambda _disease, items: {
+            study["gse_id"]: {"status": "eligible", "case_count": 2, "control_count": 2, "samples": [
+                {"accession": "GSM1", "group": "control", "included": True, "evidence": []},
+                {"accession": "GSM2", "group": "control", "included": True, "evidence": []},
+                {"accession": "GSM3", "group": "case", "included": True, "evidence": []},
+                {"accession": "GSM4", "group": "case", "included": True, "evidence": []},
+            ]} for study in items
+        }
+        crosswalk.return_value = [
+            {"raw_column": "c1", "accession": "GSM1"}, {"raw_column": "c2", "accession": "GSM2"},
+            {"raw_column": "k1", "accession": "GSM3"}, {"raw_column": "k2", "accession": "GSM4"},
+        ]
+        selection.side_effect = [
+            ([{"gse_id": "GSE1", "role": "development", "reason": "initial"}, {"gse_id": "GSE2", "role": "development", "reason": "initial"}, {"gse_id": "GSE3", "role": "development", "reason": "initial"}, {"gse_id": "GSE4", "role": "external", "reason": "initial"}], None),
+            ([{"gse_id": "GSE5", "role": "development", "reason": "replacement"}, {"gse_id": "GSE2", "role": "development", "reason": "kept"}, {"gse_id": "GSE3", "role": "development", "reason": "kept"}, {"gse_id": "GSE4", "role": "external", "reason": "kept"}], None),
+        ]
+        crosswalk.return_value = [
+            {"raw_column": "c1", "accession": "GSM1"}, {"raw_column": "c2", "accession": "GSM2"},
+            {"raw_column": "k1", "accession": "GSM3"}, {"raw_column": "k2", "accession": "GSM4"},
+        ]
+
+        def write_raw(gse: str, _filename: str, directory: Path):
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / "matrix.csv"
+            path.write_text("gene_id,c1,c2,k1,k2\nGENE1,1,2,10,11\n", encoding="utf-8")
+            return {"path": str(path)}
+
+        download.side_effect = write_raw
+        pipeline.side_effect = [
+            {"candidate_ranking": [], "development_validation": [], "external_validation": [], "external_evaluated": False, "fdr": 0.05, "min_validation_auc": 0.8, "min_validation_sensitivity": 0.7, "min_validation_specificity": 0.7},
+            {"candidate_ranking": [{"gene_id": "GENE1", "discovery": "GSE5", "passed": True}], "development_validation": [], "external_validation": [], "external_evaluated": False, "fdr": 0.05, "min_validation_auc": 0.8, "min_validation_sensitivity": 0.7, "min_validation_specificity": 0.7},
+            {"candidate_ranking": [{"gene_id": "GENE1", "discovery": "GSE5", "passed": True}], "development_validation": [], "external_validation": [{"gene_id": "GENE1", "cohort": "GSE4"}], "external_evaluated": True, "fdr": 0.05, "min_validation_auc": 0.8, "min_validation_sensitivity": 0.7, "min_validation_specificity": 0.7},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            result = run_disease("disease", Path(temporary), limit=5, max_loop_rounds=1)
+            manifest = json.loads((Path(temporary) / "provenance" / "run_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual(pipeline.call_count, 3)
+        self.assertFalse(pipeline.call_args_list[0].kwargs["include_external"])
+        self.assertFalse(pipeline.call_args_list[1].kwargs["include_external"])
+        self.assertTrue(pipeline.call_args_list[2].kwargs["include_external"])
+        self.assertEqual(selection.call_count, 2)
+        self.assertEqual(manifest["api_budget"]["loop_rounds"], 1)
+        self.assertEqual(manifest["loops"][0]["action"], "retry")
 
 
 if __name__ == "__main__":

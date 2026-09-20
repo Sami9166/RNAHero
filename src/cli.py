@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ncbi_mcp import fetch_geo_sample_metadata, fetch_raw_count_matrix, find_bulk_rnaseq
 from agent import run_summarizer_agent
-from run import resume_analysis, run_disease
+from run import DEFAULT_MAX_LOOP_ROUNDS, resume_analysis, run_disease
 from summarizer import run_summarizer
 from web import serve
 from workflow import run_pipeline
@@ -37,6 +37,7 @@ def main() -> None:
     run.add_argument("--output", type=Path, default=Path("output"))
     run.add_argument("--organism", default="Homo sapiens")
     run.add_argument("--limit", type=int, default=10)
+    run.add_argument("--max-loop-rounds", type=int, default=DEFAULT_MAX_LOOP_ROUNDS, help="maximum bounded cohort-reselection rounds")
     resume = commands.add_parser("resume", help="finish a retained analysis without repeating GEO collection or completed edgeR")
     resume.add_argument("--output", type=Path, default=Path("output"))
     summarize = commands.add_parser("summarize", help="write a top-logFC report and PCA/heatmap artifacts from a completed run")
@@ -54,7 +55,7 @@ def main() -> None:
     elif args.command == "pipeline":
         result = run_pipeline(args.config)
     elif args.command == "run":
-        result = run_disease(args.disease, args.output, args.organism, args.limit)
+        result = run_disease(args.disease, args.output, args.organism, args.limit, args.max_loop_rounds)
     elif args.command == "resume":
         result = resume_analysis(args.output)
     elif args.command == "summarize":

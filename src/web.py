@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from run import clear_output, run_disease
+from run import DEFAULT_MAX_LOOP_ROUNDS, clear_output, run_disease
 
 
 PAGE = """<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RNAHero</title><style>
@@ -71,7 +71,8 @@ class Handler(BaseHTTPRequestHandler):
             disease = str(request["disease"]).strip()
             if not disease:
                 raise ValueError("질환명을 입력하세요")
-            self._json(run_disease(disease, Path(str(request.get("output", "output")))))
+            max_loop_rounds = int(request.get("max_loop_rounds", DEFAULT_MAX_LOOP_ROUNDS))
+            self._json(run_disease(disease, Path(str(request.get("output", "output"))), max_loop_rounds=max_loop_rounds))
         except Exception as error:
             self._json({"stage": "failed", "reason": str(error), "studies": []}, 400)
 

@@ -1,10 +1,11 @@
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from workflow import Cohort, _candidate_ranking, _edger_complete, _ensembl_for_symbols, _validation_gene, run_edger, score_gene
+from workflow import Cohort, _candidate_ranking, _edger_complete, _ensembl_for_symbols, _validation_gene, run_edger, run_pipeline, score_gene
 
 
 class WorkflowTests(unittest.TestCase):
@@ -67,6 +68,33 @@ class WorkflowTests(unittest.TestCase):
         ]}
         ranking = _candidate_ranking(grouped, 0.8, 0.7, 0.7)
         self.assertEqual((ranking[0]["rank"], ranking[0]["min_auc"], ranking[0]["passed"]), (1, 0.8, True))
+
+    @patch("workflow._groups", return_value={})
+    @patch("workflow._logcpm", return_value={})
+    @patch("workflow._candidates", return_value=[])
+    @patch("workflow._edger_complete", return_value=True)
+    @patch("workflow.run_edger")
+    def test_development_phase_does_not_read_external_cohort(self, run, complete, candidates, logcpm, groups) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = {
+                "output_dir": str(root / "analysis"),
+                "validation_output_dir": str(root / "validation"),
+                "development": [
+                    {"name": name, "counts": str(root / f"{name}.csv"), "samples": str(root / f"{name}_samples.csv")}
+                    for name in ("dev1", "dev2", "dev3")
+                ],
+                "external": {"name": "external", "counts": str(root / "external.csv"), "samples": str(root / "external_samples.csv")},
+            }
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            report = run_pipeline(config_path, include_external=False)
+
+        self.assertFalse(report["external_evaluated"])
+        self.assertEqual(report["external_validation"], [])
+        self.assertEqual(logcpm.call_count, 3)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

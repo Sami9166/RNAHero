@@ -14,6 +14,12 @@ from statistics import mean
 from typing import Any
 from urllib.request import Request, urlopen
 
+try:
+    from sklearn.metrics import confusion_matrix, roc_auc_score
+except ImportError:  # pragma: no cover - pyproject installs scikit-learn in normal runs.
+    confusion_matrix = None
+    roc_auc_score = None
+
 
 ENSEMBL_BATCH_SIZE = 200
 ENSEMBL_CACHE_NAME = "ensembl_gene_id_cache.json"
@@ -64,6 +70,8 @@ def _auc(scores: list[float], labels: list[bool]) -> float:
     positives, negatives = sum(labels), len(labels) - sum(labels)
     if not positives or not negatives:
         raise ValueError("validation cohort needs case and control samples")
+    if roc_auc_score is not None:
+        return float(roc_auc_score(labels, scores))
     ordered = sorted(enumerate(scores), key=lambda pair: pair[1])
     ranks = [0.0] * len(scores)
     index = 0
@@ -186,10 +194,13 @@ def score_gene(gene: str, direction: float, discovery: Cohort, validation: Cohor
     scores = [direction * validation_values[sample] for sample in samples]
     labels = [groups[sample] == "case" for sample in samples]
     predicted = [score >= cutoff for score in scores]
-    tp = sum(prediction and label for prediction, label in zip(predicted, labels))
-    tn = sum(not prediction and not label for prediction, label in zip(predicted, labels))
-    fp = sum(prediction and not label for prediction, label in zip(predicted, labels))
-    fn = sum(not prediction and label for prediction, label in zip(predicted, labels))
+    if confusion_matrix is not None:
+        tn, fp, fn, tp = confusion_matrix(labels, predicted, labels=[False, True]).ravel()
+    else:
+        tp = sum(prediction and label for prediction, label in zip(predicted, labels))
+        tn = sum(not prediction and not label for prediction, label in zip(predicted, labels))
+        fp = sum(prediction and not label for prediction, label in zip(predicted, labels))
+        fn = sum(not prediction and label for prediction, label in zip(predicted, labels))
     return {"gene_id": gene, "validation_gene_id": validation_gene, "discovery": discovery.name, "cohort": validation.name, "direction": direction, "auc": _auc(scores, labels), "sensitivity": tp / (tp + fn), "specificity": tn / (tn + fp), "cutoff": cutoff}
 
 
@@ -225,13 +236,18 @@ def _candidate_ranking(grouped: dict[tuple[str, str], list[dict[str, Any]]], min
     return ranking
 
 
-def run_pipeline(config_path: Path) -> dict[str, Any]:
-    """Run each development cohort against the other two, then the held-out cohort."""
+def run_pipeline(config_path: Path, *, include_external: bool = True) -> dict[str, Any]:
+    """Run development validation and, when requested, the held-out evaluation."""
     config = json.loads(config_path.read_text(encoding="utf-8"))
     development = [Cohort(item["name"], Path(item["counts"]), Path(item["samples"])) for item in config["development"]]
     if len(development) != 3:
         raise ValueError("config requires exactly three development cohorts")
     external = Cohort(**{key: Path(value) if key in {"counts", "samples"} else value for key, value in config["external"].items()})
+    development_names = [cohort.name for cohort in development]
+    if len(set(development_names)) != len(development_names):
+        raise ValueError("development cohort names must be unique")
+    if external.name in set(development_names):
+        raise ValueError("external cohort must be held out from development")
     output_dir = Path(config.get("output_dir", "outputs"))
     validation_output_dir = Path(config.get("validation_output_dir", output_dir))
     fdr = float(config.get("fdr", 0.05))
@@ -279,24 +295,26 @@ def run_pipeline(config_path: Path) -> dict[str, Any]:
             for score in scores
         )
     ]
-    if not _edger_complete(_cohort_output(output_dir, external.name)):
-        run_edger(external, _cohort_output(output_dir, external.name))
     external_reports = []
-    external_values = _logcpm(_cohort_output(output_dir, external.name) / "logcpm.csv")
-    external_groups = _groups(external.samples)
-    missing_symbols = [str(row["gene_id"]) for row in locked_candidates if row["gene_id"] not in external_values]
-    external_symbol_to_ensembl = _ensembl_for_symbols(missing_symbols)
-    ensembl_to_external = {gene_id.split(".", 1)[0]: gene_id for gene_id in external_values}
-    for row in locked_candidates:
-        validation_gene = str(row["gene_id"])
-        if validation_gene not in external_values:
-            validation_gene = ensembl_to_external.get(external_symbol_to_ensembl.get(validation_gene, ""), "")
-        if not validation_gene:
-            skipped_candidates.append({"gene_id": row["gene_id"], "discovery": str(row["discovery"]), "missing_from": external.name})
-            continue
-        discovery = next(cohort for cohort in development if cohort.name == row["discovery"])
-        external_reports.append(score_gene(row["gene_id"], float(row["direction"]), discovery, external, output_dir, validation_gene, development_values[discovery.name], external_values, development_groups[discovery.name], external_groups))
-    report = {"development_validation": reports, "candidate_ranking": candidate_ranking, "locked_candidates": locked_candidates, "external_validation": external_reports, "skipped_candidates": skipped_candidates, "gene_id_standardization": {"source": "Ensembl REST lookup/symbol and lookup/id", "internal_symbol_mappings": len(symbol_to_ensembl), "internal_id_mappings": len(ensembl_to_symbol), "external_symbol_mappings": len(external_symbol_to_ensembl)}, "fdr": fdr, "min_validation_auc": min_auc, "min_validation_sensitivity": min_sensitivity, "min_validation_specificity": min_specificity}
+    external_symbol_to_ensembl: dict[str, str] = {}
+    if include_external:
+        if not _edger_complete(_cohort_output(output_dir, external.name)):
+            run_edger(external, _cohort_output(output_dir, external.name))
+        external_values = _logcpm(_cohort_output(output_dir, external.name) / "logcpm.csv")
+        external_groups = _groups(external.samples)
+        missing_symbols = [str(row["gene_id"]) for row in locked_candidates if row["gene_id"] not in external_values]
+        external_symbol_to_ensembl = _ensembl_for_symbols(missing_symbols)
+        ensembl_to_external = {gene_id.split(".", 1)[0]: gene_id for gene_id in external_values}
+        for row in locked_candidates:
+            validation_gene = str(row["gene_id"])
+            if validation_gene not in external_values:
+                validation_gene = ensembl_to_external.get(external_symbol_to_ensembl.get(validation_gene, ""), "")
+            if not validation_gene:
+                skipped_candidates.append({"gene_id": row["gene_id"], "discovery": str(row["discovery"]), "missing_from": external.name})
+                continue
+            discovery = next(cohort for cohort in development if cohort.name == row["discovery"])
+            external_reports.append(score_gene(row["gene_id"], float(row["direction"]), discovery, external, output_dir, validation_gene, development_values[discovery.name], external_values, development_groups[discovery.name], external_groups))
+    report = {"development_validation": reports, "candidate_ranking": candidate_ranking, "locked_candidates": locked_candidates, "external_validation": external_reports, "external_evaluated": include_external, "skipped_candidates": skipped_candidates, "gene_id_standardization": {"source": "Ensembl REST lookup/symbol and lookup/id", "internal_symbol_mappings": len(symbol_to_ensembl), "internal_id_mappings": len(ensembl_to_symbol), "external_symbol_mappings": len(external_symbol_to_ensembl)}, "fdr": fdr, "min_validation_auc": min_auc, "min_validation_sensitivity": min_sensitivity, "min_validation_specificity": min_specificity, "validation_engine": "scikit-learn" if roc_auc_score is not None else "builtin-fallback", "validation_metrics": ["roc_auc_score", "confusion_matrix"]}
     validation_output_dir.mkdir(parents=True, exist_ok=True)
     (validation_output_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
