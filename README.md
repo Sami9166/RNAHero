@@ -47,24 +47,24 @@ external cohort는 후보 선택, 방향 결정, cutoff 조정에 쓰지 않습�
 
 실행 과정은 다음과 같습니다.
 
-1. Orchestrator가 질환명을 받아 GEO 검색을 시작합니다. 검색 요청 규모는 최소 20개로 잡고 최대 25개 후보를 검토합니다.
+1. Orchestrator가 한글 또는 영어 질환명을 표준 영문 질환명과 GEO 제목에 쓰이는 동의어로 변환한 뒤 GEO 검색을 시작합니다. 검색 요청 규모는 최소 20개로 잡고 최대 25개 후보를 검토합니다. GEO 검색, sample metadata 조회, raw-count 다운로드, column crosswalk, PCA·heatmap·GO 시각화는 모두 로컬 MCP server의 tool 호출로 수행합니다.
 2. Curator가 GSM metadata를 읽고 case/control 근거를 sample 단위로 기록합니다. 정규화 행렬이나 소수 count는 제외하며, count column과 GSM accession이 고유하게 대응될 때만 group을 배정합니다.
 3. 선정한 3개 development cohort와 1개 external cohort를 `metadata.json`, `counts.csv`, `samples.csv`, `crosswalk.json`으로 정리합니다. 표본 구성이 불분명하면 분석을 강행하지 않습니다.
 4. edgeR이 각 development cohort의 FDR, logFC, logCPM을 계산합니다. 각 cohort를 번갈아 discovery로 두고 나머지 두 cohort에서 AUC, sensitivity, specificity를 구합니다.
 5. 내부 기준을 모두 통과한 후보를 lock한 뒤 external cohort에서 한 번만 평가합니다. 이 결과는 후보 선택이나 임계값 조정에 반영되지 않습니다.
-6. Development Critic은 cohort별 문제를 reason code로 반환합니다. 재시도 가능한 문제라면 Orchestrator가 사용하지 않은 cohort를 검토하며, 반복 횟수는 `max_loop_rounds`로 제한됩니다.
+6. Development Critic은 development cohort마다 한 번씩, 해당 cohort의 내부 검증 결과와 Curator가 남긴 sample 근거만 보고 문제를 reason code로 반환합니다. `max_loop_rounds`가 0이어도 이 점검은 수행하며, 재시도 가능한 문제라면 Orchestrator가 사용하지 않은 cohort를 검토합니다. 반복 횟수는 `max_loop_rounds`로 제한됩니다.
 7. 후보가 확정되면 Final Critic이 전체 검증을 읽기 전용으로 점검하고, Summarizer가 PCA, heatmap, GO enrichment와 Markdown 보고서를 생성합니다.
 
 ### Components
 
 | Component | Responsibility | Does not change |
 | --- | --- | --- |
-| NCBI GEO tools | 연구 검색, GSM metadata 수집, raw-count 다운로드 | 바이오마커 결론 |
+| NCBI GEO MCP server | 연구 검색, GSM metadata 수집, raw-count 다운로드, column crosswalk, R 시각화 | 바이오마커 결론 |
 | Gemini Curator | 최대 4개 연구를 한 묶음으로 검토하고 sample별 포함 근거를 기록 | edgeR 결과와 검증 기준 |
-| Orchestrator | 3개 development와 1개 external cohort 선택, 재시도 예산 관리 | held-out 결과를 이용한 후보 선택 |
+| Orchestrator | 질환명의 영문 검색어 변환, 3개 development와 1개 external cohort 선택, 재시도 예산 관리 | held-out 결과를 이용한 후보 선택 |
 | edgeR | 차등발현 분석과 log-CPM 산출 | cohort 역할 |
 | scikit-learn validation | ROC AUC와 confusion matrix 기반 sensitivity·specificity 계산 | FDR, 방향, cutoff |
-| Development Critic | cohort별 내부 검증과 재현성 문제를 사유 코드로 반환 | external 결과 평가 |
+| Development Critic | cohort별 내부 검증, sample 구성 근거, cohort 간 발현 방향 일치를 사유 코드로 반환 | external 결과 평가 |
 | Final Critic | 확정된 내부·외부 검증의 한계와 해석 가능성 점검 | 후보 순위와 기준 |
 | Summarizer | 고정된 결과와 그림 경로를 Markdown 보고서로 정리 | 후보 재순위화 |
 
@@ -113,7 +113,9 @@ NCBI_EMAIL=you@example.com
 .\.venv\Scripts\rnahero.exe run "lung adenocarcinoma" --output output --max-loop-rounds 2
 ```
 
-`--max-loop-rounds`는 development cohort 재선정 횟수입니다. CLI와 웹의 기본값은 2이며, 재시도하지 않으려면 0을 지정합니다.
+`--max-loop-rounds`는 development cohort 재선정 횟수입니다. CLI와 웹의 기본값은 2이며, 재시도하지 않으려면 0을 지정합니다. 0으로 두어도 development critic 점검과 held-out 평가 순서는 같습니다.
+
+질환명은 한글로도 입력할 수 있습니다. Orchestrator가 영문 질환명과 동의어로 바꾼 뒤 GEO를 검색하며, 변환 결과는 `run_manifest.json`의 `search_terms`에 남습니다.
 
 로컬 웹 화면도 사용할 수 있습니다.
 
@@ -214,11 +216,14 @@ output/
     curator_assessments.json
     cohorts.json
     analysis_config.json
+    prompts.jsonl
     run_manifest.json
     loop_1_curator_assessments.json
 ```
 
 `loop_*_curator_assessments.json`은 재시도가 실제로 일어났을 때만 생깁니다. 파일에는 새로 검토한 cohort와 Curator의 판정 근거가 함께 저장됩니다.
+
+`prompts.jsonl`에는 호출 순서, 단계 이름, 반복 회차, 모델명과 함께 각 LLM 호출에 사용한 프롬프트 전문이 한 줄에 하나씩 저장됩니다. `run_manifest.json`의 `api_budget.events`는 같은 호출을 `sequence`와 `prompt_chars`로만 가리켜 manifest 크기를 유지합니다.
 
 ## Manual Pipeline
 

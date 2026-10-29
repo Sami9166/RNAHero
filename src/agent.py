@@ -28,6 +28,8 @@ The packet includes a scope. When scope is "development", review only the named 
 
 Do not change candidates, directions, FDR, cutoffs, cohort roles, or acceptance criteria. Do not invent missing evidence. Treat candidate biomarkers as research candidates only; never make clinical-use claims.
 
+The packet also carries "cohort_metadata_evidence": the Curator's own per-sample case/control evidence, exclusion codes, and group sizes for the cohort under review. Use it to judge metadata reliability and sample composition, and use "direction_discordant_count" plus each candidate's "direction_concordant" flag to judge cross-cohort expression-direction agreement. Report a group of fewer than three cases or three controls as a reproducibility limit.
+
 Return JSON only with this exact shape:
 {
   "verdict": "interpretable|caution|not_interpretable",
@@ -113,9 +115,34 @@ def _provenance_artifact(output_dir: Path, filename: str) -> Path:
     return current if current.is_file() else output_dir / filename
 
 
-def _critic_packet(output_dir: Path) -> dict[str, Any]:
+CRITIC_SAMPLE_LIMIT = 40
+
+
+def _cohort_metadata_evidence(output_dir: Path, cohort_id: str) -> dict[str, Any]:
+    """Give the critic the Curator's own case/control evidence for the cohort under review."""
+    path = _provenance_artifact(output_dir, "curator_assessments.json")
+    if not path.is_file():
+        return {}
+    study = next((item for item in _read_json(path) if str(item.get("gse_id")) == cohort_id), None)
+    if not study:
+        return {}
+    assessment = study.get("cohort_assessment", {})
+    samples = assessment.get("samples", [])
+    return {
+        "gse_id": cohort_id,
+        "title": study.get("title", ""),
+        "status": assessment.get("status"),
+        "case_count": assessment.get("case_count"),
+        "control_count": assessment.get("control_count"),
+        "excluded_count": sum(1 for row in samples if not row.get("included")),
+        "exclusion_reasons": sorted({str(code) for row in samples for code in row.get("excluded_by", [])}),
+        "samples": [{key: row.get(key) for key in ("accession", "group", "included", "excluded_by", "evidence")} for row in samples[:CRITIC_SAMPLE_LIMIT]],
+        "samples_truncated": len(samples) > CRITIC_SAMPLE_LIMIT,
+    }
+
+
+def _critic_packet(output_dir: Path, report: dict[str, Any]) -> dict[str, Any]:
     """Keep the ADK prompt small while preserving every decision-relevant metric."""
-    report = _read_json(_analysis_artifact(output_dir, "validation_report.json"))
     ranking = report.get("candidate_ranking", [])
     locked = [row for row in ranking if row.get("passed")] or report.get("locked_candidates", [])
     cohorts_path = _provenance_artifact(output_dir, "cohorts.json")
@@ -141,15 +168,20 @@ def _critic_packet(output_dir: Path) -> dict[str, Any]:
 
 def _scoped_critic_packet(output_dir: Path, scope: str, cohort_id: str | None = None) -> dict[str, Any]:
     """Limit development review to evidence from the named discovery cohort."""
-    packet = _critic_packet(output_dir)
+    report = _read_json(_analysis_artifact(output_dir, "validation_report.json"))
+    packet = _critic_packet(output_dir, report)
     packet["scope"] = scope
     if cohort_id:
         packet["cohort_id"] = cohort_id
+        packet["cohort_metadata_evidence"] = _cohort_metadata_evidence(output_dir, cohort_id)
+        validation = packet["validation"]
         for field in ("locked_candidates", "top_ranked_candidates"):
-            rows = packet["validation"].get(field, [])
-            packet["validation"][field] = [
-                row for row in rows if str(row.get("discovery")) == cohort_id
-            ]
+            validation[field] = [row for row in validation.get(field, []) if str(row.get("discovery")) == cohort_id]
+        scoped_ranking = [row for row in report.get("candidate_ranking", []) if str(row.get("discovery")) == cohort_id]
+        validation["ranked_candidate_count"] = len(scoped_ranking)
+        validation["direction_discordant_count"] = sum(1 for row in scoped_ranking if not row.get("direction_concordant", True))
+        validation["internal_validation_row_count"] = sum(1 for row in report.get("development_validation", []) if str(row.get("discovery")) == cohort_id)
+        validation["skipped_candidate_count"] = sum(1 for row in report.get("skipped_candidates", []) if str(row.get("discovery")) == cohort_id)
     if scope == "development":
         packet["validation"]["external_validation"] = []
         packet["validation"]["external_evaluated"] = False
@@ -198,6 +230,7 @@ def run_critic(output_dir: Path, *, scope: str = "final", cohort_id: str | None 
     if cohort_id:
         result["cohort_id"] = cohort_id
     result["engine"] = "google-adk"
+    result["prompt"] = prompt
     return result
 
 
@@ -206,7 +239,7 @@ def run_development_critic(output_dir: Path, cohort_id: str) -> dict[str, Any]:
     return run_critic(output_dir, scope="development", cohort_id=cohort_id)
 
 
-def run_summarizer_agent(summary: dict[str, Any]) -> str:
+def run_summarizer_agent(summary: dict[str, Any]) -> tuple[str, str]:
     """Ask the ADK summarizer to turn completed artifacts into a Markdown report."""
     prompt = "Completed deterministic summary packet:\n" + json.dumps(summary, ensure_ascii=False)
     text = asyncio.run(_run_agent_async(build_summarizer(), "rnahero_summarizer", prompt)).strip()
@@ -214,4 +247,4 @@ def run_summarizer_agent(summary: dict[str, Any]) -> str:
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     if not text.startswith("# RNAHero 요약 보고서"):
         raise RuntimeError("ADK summarizer did not return the required Markdown report")
-    return text + "\n"
+    return text + "\n", prompt

@@ -7,9 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from ncbi_mcp import fetch_geo_sample_metadata, fetch_raw_count_matrix, find_bulk_rnaseq
 from agent import run_summarizer_agent
-from run import DEFAULT_MAX_LOOP_ROUNDS, resume_analysis, run_disease
+from run import DEFAULT_MAX_LOOP_ROUNDS, fetch_geo_sample_metadata, fetch_raw_count_matrix, find_bulk_rnaseq, resume_analysis, run_disease
 from summarizer import run_summarizer
 from web import serve
 from workflow import run_pipeline
@@ -61,7 +60,7 @@ def main() -> None:
     elif args.command == "summarize":
         summary = run_summarizer(args.output)
         report_path = args.output / "report" / "summary_report.md"
-        report_path.write_text(run_summarizer_agent(summary), encoding="utf-8")
+        report_path.write_text(run_summarizer_agent(summary)[0], encoding="utf-8")
         result = {"report": str(report_path), "figures": summary["visualizations"]}
     else:
         serve(args.port)

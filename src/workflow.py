@@ -224,6 +224,8 @@ def _candidate_ranking(grouped: dict[tuple[str, str], list[dict[str, Any]]], min
             "mean_auc": mean(float(score["auc"]) for score in scores),
             "min_sensitivity": min(float(score["sensitivity"]) for score in scores),
             "min_specificity": min(float(score["specificity"]) for score in scores),
+            # An AUC below 0.5 means the discovery direction is reversed in that validation cohort.
+            "direction_concordant": all(float(score["auc"]) >= 0.5 for score in scores),
             "passed": all(float(score["auc"]) >= min_auc and float(score["sensitivity"]) >= min_sensitivity and float(score["specificity"]) >= min_specificity for score in scores),
         }
         for index, score in enumerate(scores, 1):

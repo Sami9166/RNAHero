@@ -405,20 +405,31 @@ def fetch_raw_count_matrix(gse_id: str, filename: str, output_dir: Path | None =
 
 
 @mcp.tool()
-def download_raw_count_matrix(gse_id: str, filename: str) -> dict[str, Any]:
-    """Download one previously discovered raw-count file into RNAHero/data/raw."""
-    return fetch_raw_count_matrix(gse_id, filename)
+def download_raw_count_matrix(gse_id: str, filename: str, output_dir: str | None = None) -> dict[str, Any]:
+    """Download one previously discovered raw-count file into a run folder or RNAHero/data/raw."""
+    return fetch_raw_count_matrix(gse_id, filename, Path(output_dir) if output_dir else None)
 
 
 @mcp.tool()
 def create_pca_heatmap(output_dir: str, cohort_id: str, gene_ids: list[str]) -> dict[str, Any]:
     """Create PCA and heatmap PNGs for selected genes from a completed local RNAHero run."""
-    from summarizer import create_pca_heatmap as create_visuals
+    import summarizer
 
-    return create_visuals(Path(output_dir), cohort_id, gene_ids)
+    return summarizer.create_pca_heatmap(Path(output_dir), cohort_id, gene_ids)
+
+
+@mcp.tool()
+def create_go_enrichment(output_dir: str, cohort_id: str, fdr: float) -> dict[str, Any]:
+    """Create the GO enrichment table and dot plot for one cohort of a completed local run."""
+    import summarizer
+
+    return summarizer.create_go_enrichment(Path(output_dir), cohort_id, fdr)
 
 
 def main() -> None:
+    # Importing the R/validation stack inside a tool call deadlocks the stdio loop; do it up front.
+    import summarizer  # noqa: F401
+
     mcp.run()
 
 

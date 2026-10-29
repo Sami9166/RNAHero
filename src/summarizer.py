@@ -13,6 +13,7 @@ from typing import Any
 
 import certifi
 
+from mcp_client import call_tool
 from workflow import _rscript
 
 
@@ -169,13 +170,17 @@ def run_summarizer(output_dir: Path) -> dict[str, Any]:
     }
     for row in top_five:
         row["external"] = external_scores.get((str(row["gene_id"]), str(row["discovery"])))
-    development_visual = create_pca_heatmap(output_dir, primary, [str(row["gene_id"]) for row in top_five])
-    external_visual = create_pca_heatmap(
-        output_dir,
-        external,
-        [str(row["external"]["validation_gene_id"]) for row in top_five if row.get("external")],
+    development_visual = call_tool(
+        "create_pca_heatmap", output_dir=str(output_dir), cohort_id=primary,
+        gene_ids=[str(row["gene_id"]) for row in top_five],
     )
-    go_enrichment = create_go_enrichment(output_dir, primary, float(report["fdr"]))
+    external_visual = call_tool(
+        "create_pca_heatmap", output_dir=str(output_dir), cohort_id=external,
+        gene_ids=[str(row["external"]["validation_gene_id"]) for row in top_five if row.get("external")],
+    )
+    go_enrichment = call_tool(
+        "create_go_enrichment", output_dir=str(output_dir), cohort_id=primary, fdr=float(report["fdr"]),
+    )
     critic_path = output_dir / "analysis" / "validation" / "critic_report.json"
     critic = json.loads(critic_path.read_text(encoding="utf-8")) if critic_path.is_file() else {}
     return {

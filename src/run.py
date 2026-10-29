@@ -21,9 +21,29 @@ from typing import Any
 from dotenv import load_dotenv
 
 from agent import run_critic, run_development_critic, run_summarizer_agent
-from ncbi_mcp import fetch_geo_sample_metadata, fetch_raw_count_matrix, find_bulk_rnaseq, match_count_columns_to_samples
+from mcp_client import call_tool
 from summarizer import run_summarizer
 from workflow import run_pipeline
+
+
+def find_bulk_rnaseq(disease: str, organism: str = "Homo sapiens", limit: int = 10) -> list[dict[str, Any]]:
+    """Search GEO through the local MCP server."""
+    return call_tool("search_bulk_rnaseq", disease=disease, organism=organism, limit=limit)
+
+
+def fetch_geo_sample_metadata(gse_id: str, max_samples: int = 200) -> dict[str, Any]:
+    """Read GEO sample metadata through the local MCP server."""
+    return call_tool("get_geo_sample_metadata", gse_id=gse_id, max_samples=max_samples)
+
+
+def fetch_raw_count_matrix(gse_id: str, filename: str, output_dir: Path) -> dict[str, Any]:
+    """Download one verified raw-count file through the local MCP server."""
+    return call_tool("download_raw_count_matrix", gse_id=gse_id, filename=filename, output_dir=str(output_dir))
+
+
+def match_geo_sample_columns(gse_id: str, raw_columns: list[str]) -> list[dict[str, str]]:
+    """Crosswalk count-matrix columns to GEO accessions through the local MCP server."""
+    return call_tool("match_geo_sample_columns", gse_id=gse_id, raw_columns=raw_columns)
 
 
 AI_FIELD_PREFIXES = (
@@ -37,7 +57,9 @@ AI_FIELD_PREFIXES = (
 MAX_AI_FIELD_CHARS = 500
 COHORT_BATCH_SIZE = 4
 DEFAULT_MAX_LOOP_ROUNDS = 2
-BASE_AGENT_CALLS = 6  # Orchestrator + three development critics + external critic + summarizer.
+BASE_AGENT_CALLS = 7  # Orchestrator search terms + cohort selection + three development critics + external critic + summarizer.
+MIN_CRITIC_GROUP_SIZE = 3  # Two is enough for edgeR but too few to report a cohort as reproducible.
+CRITIC_SAMPLE_LIMIT = 40
 RETRYABLE_REASON_CODES = {
     "cohort_selection",
     "insufficient_internal_validation",
@@ -57,6 +79,7 @@ class ApiCallLedger:
     candidate_count: int
     max_loop_rounds: int
     batch_size: int = COHORT_BATCH_SIZE
+    prompt_log: Path | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     loop_rounds: int = 0
     budget: int = field(init=False)
@@ -71,13 +94,33 @@ class ApiCallLedger:
     def api_call_count(self) -> int:
         return sum(1 for event in self.events if event.get("kind") != "local")
 
-    def reserve(self, kind: str, phase: str, loop_round: int = 0) -> None:
+    def reserve(self, kind: str, phase: str, loop_round: int = 0) -> dict[str, Any]:
         with self._lock:
             if self.api_call_count >= self.budget:
                 raise ApiCallBudgetExceeded(
                     f"API call budget exceeded ({self.api_call_count}/{self.budget}) before {phase}"
                 )
-            self.events.append({"kind": kind, "phase": phase, "loop_round": loop_round})
+            event = {"sequence": len(self.events), "kind": kind, "phase": phase, "loop_round": loop_round}
+            self.events.append(event)
+            return event
+
+    def record_prompt(self, event: dict[str, Any], prompt: str) -> None:
+        """Keep the manifest small by logging full prompt text beside the run."""
+        event["prompt_chars"] = len(prompt)
+        if self.prompt_log is None:
+            return
+        entry = {
+            "sequence": event["sequence"],
+            "phase": event["phase"],
+            "loop_round": event["loop_round"],
+            "model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+            "prompt": prompt,
+        }
+        with self._lock:
+            self.prompt_log.parent.mkdir(parents=True, exist_ok=True)
+            with self.prompt_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        event["prompt_log"] = str(self.prompt_log)
 
     def record_local(self, phase: str, loop_round: int = 0) -> None:
         with self._lock:
@@ -102,7 +145,8 @@ class ApiCallLedger:
             "budget": self.budget,
             "api_call_count": self.api_call_count,
             "events": list(self.events),
-            "formula": "ceil(N/4) + 6 + sum(K_l + 4)",
+            "prompt_log": str(self.prompt_log) if self.prompt_log else None,
+            "formula": "ceil(N/4) + 7 + sum(K_l + 4)",
         }
 
 
@@ -112,7 +156,7 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 RANKING_FIELDS = [
-    "rank", "gene_id", "discovery", "direction", "min_auc", "mean_auc", "min_sensitivity", "min_specificity", "passed",
+    "rank", "gene_id", "discovery", "direction", "direction_concordant", "min_auc", "mean_auc", "min_sensitivity", "min_specificity", "passed",
     "validation_1_cohort", "validation_1_auc", "validation_1_sensitivity", "validation_1_specificity",
     "validation_2_cohort", "validation_2_auc", "validation_2_sensitivity", "validation_2_specificity",
 ]
@@ -183,7 +227,7 @@ def _ask_gemini(
         return None, "GEMINI_API_KEY is not configured"
     if ledger is not None:
         try:
-            ledger.reserve("gemini", phase, loop_round)
+            ledger.record_prompt(ledger.reserve("gemini", phase, loop_round), prompt)
         except ApiCallBudgetExceeded as error:
             return None, str(error)
     from google import genai
@@ -203,6 +247,28 @@ def _ask_gemini(
                 return None, str(error)
             time.sleep(delay)
     return None, "Gemini retries exhausted"
+
+
+def _search_terms(
+    disease: str,
+    *,
+    ledger: ApiCallLedger | None = None,
+) -> tuple[list[str], str | None]:
+    """Turn a Korean or English disease name into NCBI-ready English search terms."""
+    answer, error = _ask_gemini(
+        "You prepare NCBI GEO search terms for a bulk RNA-seq biomarker workflow. "
+        f"The user typed this disease name, which may be written in Korean or English: {disease}. "
+        "Translate it into the standard English disease name used in biomedical literature, then add at most three English synonyms or abbreviations that GEO study titles actually use. "
+        "Do not add organism, assay, tissue, or study-design words. Do not broaden or narrow the disease, and do not guess when the input names no disease: return an empty list instead. "
+        "Return JSON only: {\"disease_en\":\"...\",\"synonyms\":[\"...\"]}.",
+        ledger=ledger,
+        phase="orchestrator_disease_terms",
+    )
+    if error:
+        return [], error
+    terms = [str(answer.get("disease_en", "")).strip()] + [str(item).strip() for item in (answer or {}).get("synonyms", [])]
+    unique = list(dict.fromkeys(term for term in terms if term))
+    return unique, None if unique else "Gemini returned no usable English disease term"
 
 
 def _select_cohorts(
@@ -555,7 +621,7 @@ def _prepare_cohorts(
             raw_path = Path(download["path"])
             columns = _columns(raw_path)
             _require_integer_counts(raw_path)
-            crosswalk = match_count_columns_to_samples(columns, study["sample_metadata"])
+            crosswalk = match_geo_sample_columns(study["gse_id"], columns)
             _write_json(cohort_dir / "input" / "crosswalk.json", crosswalk)
             groups, group_error = _groups_from_assessment(study["cohort_assessment"], columns, crosswalk)
             if not groups:
@@ -625,21 +691,27 @@ def _persist_cohort_selection(
     return cohorts
 
 
-def _deterministic_development_critic(analysis: dict[str, Any], cohort_id: str) -> dict[str, Any]:
+def _deterministic_development_critic(analysis: dict[str, Any], cohort_id: str, assessment: dict[str, Any] | None = None) -> dict[str, Any]:
     """Produce a local safety check when an ADK critic is unavailable."""
     rows = [row for row in analysis.get("development_validation", []) if str(row.get("discovery")) == cohort_id]
-    passed = [row for row in analysis.get("candidate_ranking", []) if str(row.get("discovery")) == cohort_id and row.get("passed")]
+    ranked = [row for row in analysis.get("candidate_ranking", []) if str(row.get("discovery")) == cohort_id]
+    passed = [row for row in ranked if row.get("passed")]
+    discordant = [row for row in ranked if not row.get("direction_concordant", True)]
     reason_codes: list[str] = []
     if not rows:
         reason_codes.append("insufficient_internal_validation")
     if not passed:
         reason_codes.append("no_locked_candidates")
+    if ranked and len(discordant) * 2 > len(ranked):
+        reason_codes.append("reproducibility_gap")
+    if assessment and min(assessment.get("case_count", 0), assessment.get("control_count", 0)) < MIN_CRITIC_GROUP_SIZE:
+        reason_codes.append("cohort_selection")
     return {
         "engine": "deterministic-fallback",
         "scope": "development",
         "cohort_id": cohort_id,
         "verdict": "interpretable" if not reason_codes else "caution",
-        "summary": f"{cohort_id}: 내부 검증 행 {len(rows)}개, 기준 통과 후보 {len(passed)}개",
+        "summary": f"{cohort_id}: 내부 검증 행 {len(rows)}개, 기준 통과 후보 {len(passed)}개, 방향 불일치 후보 {len(discordant)}개",
         "reason_codes": reason_codes,
     }
 
@@ -651,15 +723,17 @@ def _run_development_critics(
     validation_dir: Path,
     ledger: ApiCallLedger,
     loop_round: int,
+    assessments: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for item in config.get("development", []):
         cohort_id = str(item["name"])
         try:
-            ledger.reserve("adk", "development_critic", loop_round)
+            event = ledger.reserve("adk", "development_critic", loop_round)
             report = run_development_critic(output_dir, cohort_id)
+            ledger.record_prompt(event, report.pop("prompt", ""))
         except Exception:
-            report = _deterministic_development_critic(analysis, cohort_id)
+            report = _deterministic_development_critic(analysis, cohort_id, (assessments or {}).get(cohort_id))
         reports.append(report)
         _write_json(validation_dir / f"critic_{cohort_id}.json", report)
     return reports
@@ -703,19 +777,21 @@ def _record_analysis(
     if not finalize:
         return result
     try:
-        if ledger is not None:
-            ledger.reserve("adk", "external_critic", loop_round)
+        event = ledger.reserve("adk", "external_critic", loop_round) if ledger is not None else None
         critic = run_critic(output_dir)
+        if ledger is not None and event is not None:
+            ledger.record_prompt(event, critic.pop("prompt", ""))
         _write_json(validation_dir / "critic_report.json", critic)
         result["critic"] = critic
         manifest["critic"] = {key: critic.get(key) for key in ("engine", "verdict", "summary", "reason_codes")}
     except Exception as error:
         manifest["critic"] = {"status": "unavailable", "reason": str(error)}
     try:
-        if ledger is not None:
-            ledger.reserve("adk", "summarizer", loop_round)
+        event = ledger.reserve("adk", "summarizer", loop_round) if ledger is not None else None
         summary = run_summarizer(output_dir)
-        report = run_summarizer_agent(summary)
+        report, prompt = run_summarizer_agent(summary)
+        if ledger is not None and event is not None:
+            ledger.record_prompt(event, prompt)
         report_dir = output_dir / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
         (report_dir / "summary_report.md").write_text(report, encoding="utf-8")
@@ -774,8 +850,13 @@ def run_disease(
     }
     _write_json(provenance / "run_manifest.json", manifest)
     candidate_limit = min(25, max(20, limit))
+    ledger = ApiCallLedger(candidate_limit, max_loop_rounds, prompt_log=provenance / "prompts.jsonl")
+    terms, term_error = _search_terms(disease, ledger=ledger)
+    manifest["search_terms"] = {"input": disease, "terms": terms or [disease], "reason": term_error}
     try:
-        clinical_queries, studies = _clinical_candidates(disease, organism, candidate_limit)
+        clinical_queries, studies = _clinical_candidates(
+            " OR ".join(f'"{term}"' for term in terms) if terms else disease, organism, candidate_limit
+        )
     except Exception as error:
         manifest.update({"stage": "search_failed", "reason": str(error), "candidate_limit": candidate_limit})
         _write_json(provenance / "run_manifest.json", manifest)
@@ -784,7 +865,6 @@ def run_disease(
     manifest["candidate_limit"] = candidate_limit
     manifest["studies"] = [_candidate_preview(study) for study in studies]
     _write_json(provenance / "search_results.json", manifest["studies"])
-    ledger = ApiCallLedger(len(studies), max_loop_rounds)
     manifest["api_budget"] = ledger.snapshot()
     try:
         studies_with_metadata = [{**study, **fetch_geo_sample_metadata(study["gse_id"])} for study in studies]
@@ -854,22 +934,13 @@ def run_disease(
         cohorts = _persist_cohort_selection(output_dir, provenance, prepared, by_id)
         config = _analysis_config(analysis_dir, prepared, max_loop_rounds=max_loop_rounds)
         _write_json(provenance / "analysis_config.json", config)
-        manifest.update({"stage": "analysing", "cohorts": cohorts, "rejected_count": len(rejected), "active_loop_round": round_index})
+        manifest.update({"stage": "analysing", "cohorts": cohorts, "rejected_count": len(rejected), "active_loop_round": round_index, "analysis_config": config})
         manifest["api_budget"] = ledger.snapshot()
         _write_json(provenance / "run_manifest.json", manifest)
         try:
-            analysis = run_pipeline(
-                provenance / "analysis_config.json",
-                include_external=max_loop_rounds == 0,
-            )
+            analysis = run_pipeline(provenance / "analysis_config.json", include_external=False)
         except Exception as error:
             manifest.update({"stage": "analysis_failed", "reason": str(error)})
-            break
-
-        if max_loop_rounds == 0:
-            _record_analysis(output_dir, manifest, analysis, ledger=ledger, loop_round=round_index)
-            manifest.update({"stage": "complete", "stop_reason": "single_pass_complete"})
-            finalised = True
             break
 
         _record_analysis(output_dir, manifest, analysis, finalize=False, ledger=ledger, loop_round=round_index)
@@ -880,6 +951,7 @@ def run_disease(
             analysis_dir / "validation",
             ledger,
             round_index,
+            {study["gse_id"]: study["cohort_assessment"] for study in current_assessed},
         )
         reason_codes = _retry_reason_codes(analysis, critic_reports)
         loop_record = {
@@ -933,6 +1005,7 @@ def run_disease(
         current_eligible = [study for study in current_assessed if study["cohort_assessment"]["status"] == "eligible"]
         assessed_replacements = [updated_by_id[study["gse_id"]] for study in replacement_batch]
         _write_json(provenance / f"loop_{round_index + 1}_curator_assessments.json", assessed_replacements)
+        _write_json(provenance / "curator_assessments.json", current_assessed)
         replacement_ids = {study["gse_id"] for study in replacement_batch}
         candidate_pool = [
             study for study in current_assessed

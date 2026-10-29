@@ -4,18 +4,52 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from run import ApiCallLedger, _ai_sample_metadata, _assess_cohort, _columns, _groups_from_assessment, _prepare_matrix, _retry_seconds, clear_output, run_disease
+from run import ApiCallLedger, _ai_sample_metadata, _assess_cohort, _columns, _deterministic_development_critic, _groups_from_assessment, _prepare_matrix, _retry_seconds, _search_terms, clear_output, run_disease
 
 
 class RunTests(unittest.TestCase):
     def test_api_budget_matches_proposal_formula(self) -> None:
         ledger = ApiCallLedger(20, 2)
-        self.assertEqual(ledger.snapshot()["budget"], 11)
+        self.assertEqual(ledger.snapshot()["budget"], 12)
         ledger.open_loop(4)
-        self.assertEqual(ledger.snapshot()["budget"], 16)
+        self.assertEqual(ledger.snapshot()["budget"], 17)
         ledger.open_loop(4)
-        self.assertEqual(ledger.snapshot()["budget"], 21)
-        self.assertEqual(ledger.snapshot()["formula"], "ceil(N/4) + 6 + sum(K_l + 4)")
+        self.assertEqual(ledger.snapshot()["budget"], 22)
+        self.assertEqual(ledger.snapshot()["formula"], "ceil(N/4) + 7 + sum(K_l + 4)")
+
+    def test_prompt_log_keeps_text_out_of_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "provenance" / "prompts.jsonl"
+            ledger = ApiCallLedger(20, 0, prompt_log=log)
+            ledger.record_prompt(ledger.reserve("gemini", "orchestrator_disease_terms"), "translate 폐선암")
+            event = ledger.snapshot()["events"][0]
+            self.assertEqual(event["prompt_chars"], len("translate 폐선암"))
+            self.assertNotIn("prompt", event)
+            entry = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(entry["prompt"], "translate 폐선암")
+            self.assertEqual(entry["phase"], "orchestrator_disease_terms")
+
+    @patch("run._ask_gemini")
+    def test_search_terms_translate_and_deduplicate(self, ask) -> None:
+        ask.return_value = ({"disease_en": "lung adenocarcinoma", "synonyms": ["LUAD", "lung adenocarcinoma", ""]}, None)
+        self.assertEqual(_search_terms("폐선암"), (["lung adenocarcinoma", "LUAD"], None))
+        ask.return_value = ({"disease_en": "", "synonyms": []}, None)
+        terms, reason = _search_terms("???")
+        self.assertEqual(terms, [])
+        self.assertIsNotNone(reason)
+        ask.return_value = (None, "GEMINI_API_KEY is not configured")
+        self.assertEqual(_search_terms("폐선암"), ([], "GEMINI_API_KEY is not configured"))
+
+    def test_development_critic_fallback_flags_direction_and_group_size(self) -> None:
+        analysis = {"development_validation": [{"discovery": "GSE1"}], "candidate_ranking": [
+            {"discovery": "GSE1", "passed": True, "direction_concordant": False},
+            {"discovery": "GSE1", "passed": True, "direction_concordant": False},
+            {"discovery": "GSE1", "passed": True, "direction_concordant": True},
+        ]}
+        report = _deterministic_development_critic(analysis, "GSE1", {"case_count": 2, "control_count": 9})
+        self.assertEqual(sorted(report["reason_codes"]), ["cohort_selection", "reproducibility_gap"])
+        clean = _deterministic_development_critic(analysis, "GSE1", {"case_count": 5, "control_count": 5})
+        self.assertEqual(clean["reason_codes"], ["reproducibility_gap"])
 
     def test_clear_output_only_removes_a_project_subfolder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -30,10 +64,11 @@ class RunTests(unittest.TestCase):
                     clear_output(root)
             self.assertFalse(output.exists())
 
+    @patch("run._search_terms", return_value=(["disease"], None))
     @patch("run._assess_cohorts", return_value={"GSE1": {"status": "insufficient_usable_groups", "case_count": 0, "control_count": 0, "samples": []}})
     @patch("run.fetch_geo_sample_metadata")
     @patch("run.find_bulk_rnaseq")
-    def test_run_persists_search_metadata_before_safe_stop(self, search, metadata, _assessment) -> None:
+    def test_run_persists_search_metadata_before_safe_stop(self, search, metadata, _assessment, _terms) -> None:
         search.return_value = [{"gse_id": "GSE1", "title": "study", "sample_count": 4, "raw_count_files": []}]
         metadata.return_value = {"gse_id": "GSE1", "sample_metadata": [{"accession": "GSM1", "fields": []}]}
         with tempfile.TemporaryDirectory() as temporary:
@@ -45,10 +80,11 @@ class RunTests(unittest.TestCase):
             self.assertFalse((output / "evidence").exists())
             self.assertTrue((output / "provenance" / "run_manifest.json").is_file())
 
+    @patch("run._search_terms", return_value=(["disease"], None))
     @patch("run._assess_cohorts", return_value={"GSE1": {"status": "assessment_failed", "reason": "API key not valid", "samples": []}})
     @patch("run.fetch_geo_sample_metadata")
     @patch("run.find_bulk_rnaseq")
-    def test_run_reports_ai_configuration_failure(self, search, metadata, _assessment) -> None:
+    def test_run_reports_ai_configuration_failure(self, search, metadata, _assessment, _terms) -> None:
         search.return_value = [{"gse_id": "GSE1", "title": "study", "sample_count": 4, "raw_count_files": []}]
         metadata.return_value = {"gse_id": "GSE1", "sample_metadata": []}
         with tempfile.TemporaryDirectory() as temporary:
@@ -142,15 +178,17 @@ class RunTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual([item["group"] for item in groups], ["case", "case", "control", "control"])
 
+    @patch("run._search_terms", return_value=(["disease"], None))
+    @patch("run.run_development_critic", return_value={"scope": "development", "reason_codes": ["no_locked_candidates"], "verdict": "caution"})
     @patch("run.run_critic", return_value={"engine": "google-adk", "verdict": "caution", "summary": "reviewed"})
     @patch("run.run_pipeline", return_value={"candidate_ranking": [], "fdr": 0.05, "min_validation_auc": 0.8, "min_validation_sensitivity": 0.7, "min_validation_specificity": 0.7})
     @patch("run._select_cohorts")
     @patch("run._assess_cohorts")
-    @patch("run.match_count_columns_to_samples")
+    @patch("run.match_geo_sample_columns")
     @patch("run.fetch_raw_count_matrix")
     @patch("run.fetch_geo_sample_metadata")
     @patch("run.find_bulk_rnaseq")
-    def test_one_command_prepares_four_cohorts_and_runs_analysis(self, search, metadata, download, crosswalk, assessment, selection, pipeline, critic) -> None:
+    def test_one_command_prepares_four_cohorts_and_runs_analysis(self, search, metadata, download, crosswalk, assessment, selection, pipeline, critic, development_critic, _terms) -> None:
         studies = [{"gse_id": f"GSE{i}", "title": f"study {i}", "sample_count": 4, "raw_count_files": [{"filename": "matrix.csv"}]} for i in range(1, 5)]
         search.return_value = studies
         metadata.side_effect = lambda gse: {"gse_id": gse, "sample_metadata": []}
@@ -190,20 +228,25 @@ class RunTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "analysis" / "validation" / "critic_report.json").read_text(encoding="utf-8"))["verdict"], "caution")
             self.assertEqual(result["critic"]["engine"], "google-adk")
             self.assertEqual(json.loads((root / "provenance" / "search_results.json").read_text(encoding="utf-8")), [{"gse_id": f"GSE{i}", "title": f"study {i}"} for i in range(1, 5)])
-            self.assertEqual(pipeline.call_count, 1)
+            self.assertEqual(pipeline.call_count, 2)
+            self.assertFalse(pipeline.call_args_list[0].kwargs["include_external"])
+            self.assertTrue(pipeline.call_args_list[1].kwargs["include_external"])
             self.assertEqual(pipeline.call_args.args[0], root / "provenance" / "analysis_config.json")
             self.assertEqual(critic.call_count, 1)
+            self.assertEqual(development_critic.call_count, 3)
+            self.assertTrue((root / "analysis" / "validation" / "critic_GSE1.json").is_file())
 
+    @patch("run._search_terms", return_value=(["disease"], None))
     @patch("run.run_development_critic", return_value={"scope": "development", "reason_codes": ["no_locked_candidates"], "verdict": "caution"})
     @patch("run.run_critic", return_value={"engine": "google-adk", "verdict": "caution", "summary": "reviewed", "reason_codes": []})
     @patch("run.run_pipeline")
     @patch("run._select_cohorts")
     @patch("run._assess_cohorts")
-    @patch("run.match_count_columns_to_samples")
+    @patch("run.match_geo_sample_columns")
     @patch("run.fetch_raw_count_matrix")
     @patch("run.fetch_geo_sample_metadata")
     @patch("run.find_bulk_rnaseq")
-    def test_bounded_retry_reselects_unused_cohort(self, search, metadata, download, crosswalk, assessment, selection, pipeline, critic, development_critic) -> None:
+    def test_bounded_retry_reselects_unused_cohort(self, search, metadata, download, crosswalk, assessment, selection, pipeline, critic, development_critic, _terms) -> None:
         studies = [{"gse_id": f"GSE{i}", "title": f"study {i}", "sample_count": 4, "raw_count_files": [{"filename": "matrix.csv"}]} for i in range(1, 6)]
         search.return_value = studies
         metadata.side_effect = lambda gse: {"gse_id": gse, "sample_metadata": []}
